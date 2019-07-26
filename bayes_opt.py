@@ -9,20 +9,26 @@ Last modified 7.24.2019
 import scipy
 import numpy as np
 import sklearn.gaussian_process
+from scipy.optimize import minimize
+from scipy.special import erf
 
 class BayesOpt(object):
 
-    def __init__(self, model, num_params, acquisition_fxn='EI', surrogate_fxn='GP-RBF', seed_data=None):
+    def __init__(self, model, param_bounds, acquisition_fxn='EI', surrogate_fxn='GP-RBF', seed_data=None):
         
         # number of parameters to evaluate
-        self.num_design_params = 2
+        self.num_design_params = len(param_bounds)
+        self.param_bounds = np.array(param_bounds)
 
         # save model, surrogate model, and acquisition fxn
         self.model = model
-        self.surrogate = self.initialize_surrogate(surrogate_fxn,seed_data)
-        self.aquisition = self.initialize_acquisition(acquisition_fxn)
+        self.surrogate = self.initialize_surrogate(surrogate_fxn,self.num_design_params, seed_data)
+        self.acquisition = self.initialize_acquisition(acquisition_fxn)
 
-        best_current_minimizer = None
+        # best current design point that minimizes the acquisition fxn
+        # stores best result as optimization runs
+        self.best_current_minimizer = [(self.param_bounds[:,1]-self.param_bounds[:,0])*np.random.random(
+                            self.param_bounds.shape[0]) + self.param_bounds[:,0],0]
 
     def evaluate_model(self, sample_point):
         """
@@ -40,7 +46,7 @@ class BayesOpt(object):
         """
         return self.model.evaluate(sample_point)
 
-    def initialize_surrogate(self, surrogate_fxn, seed_data=None):
+    def initialize_surrogate(self, surrogate_fxn, num_design_params, seed_data=None):
         """
         Initialize the surrogate model to be used.
 
@@ -59,7 +65,21 @@ class BayesOpt(object):
             kernel = surrogate_fxn.split('-')[1]
 
             # create surrogate model instance
-            model = GPSurrogate(kernel=kernel, seed=seed_data)
+            model = GPSurrogate(num_design_params)
+            # model = sklearn.gaussian_process.G
+
+            # seed surrogate w/ some uniformly sampled points
+            if seed_data is None:
+                X = (self.param_bounds[:,1]-self.param_bounds[:,0])*np.random.random(
+                                (5,self.param_bounds.shape[0])) + self.param_bounds[:,0]
+                y = []
+                for i in range(0,X.shape[0]):
+                    y.append(self.evaluate_model(X[i,:]))
+                y = np.array(y)
+
+            model.initialize(X,y)
+
+        return model
 
     def update_surrogate(self, model, model_sample, sample_point):
         """
@@ -80,13 +100,14 @@ class BayesOpt(object):
         updated_model
             Updated surrogate model.
         """
-        pass
+        return model.update_parameters(sample_point,model_sample)
 
     def initialize_acquisition(self, acquisition_fxn):
         """
         Initialize acquisition function to be specified function.
         """
-        pass
+        if acquisition_fxn is 'EI':
+            return ExpectedImprovement(self.param_bounds)
 
     def update_acquisition(self, sample_point, best_current_minimizer):
         """
@@ -108,9 +129,9 @@ class BayesOpt(object):
             The new best point at which to sample the black box model.
         """
 
-        pass
+        return self.acquisition.evaluate(self.surrogate, best_current_minimizer)
 
-    def optimize(self, tol=1E-5, max_iterations=10000):
+    def optimize(self, tol=1E-5, max_iterations=1000):
         """
         Find the optimal design point using Bayesian optimization.
 
@@ -124,7 +145,7 @@ class BayesOpt(object):
             Set to -1 to not use tolerance as a
             stopping criteria.
 
-        max_iterations : default 10000
+        max_iterations : default 1000
             The number of iterations the optimization will run for until
             termination, regardless if an optimum is found.
 
@@ -136,18 +157,30 @@ class BayesOpt(object):
 
         num_iterations = 0
         diff = 999999999
-        sample_point = 
+        # compute first point to test w/ uniform sample of param space
+        sample_point = (self.param_bounds[:,1]-self.param_bounds[:,0])*np.random.random(
+                            self.param_bounds.shape[0]) + self.param_bounds[:,0]
 
-        while diff > tol and num_iterations < max_iterations:
+        # while diff > tol and num_iterations < max_iterations:
+        while num_iterations < max_iterations:
 
-            sample_point = self.update_acquisition(sample_point)
+            # get next sample point from acquisition fxn
+            sample_point = self.update_acquisition(sample_point,self.best_current_minimizer)
+            # evaluate model at chosen sample point
+            print('sample: {}'.format(sample_point))
             model_result = self.evaluate_model(sample_point)
-            self.update_surrogate(self.model, model_result, sample_point)
+            print('model result: {}'.format(model_result))
+            
+            if model_result < self.best_current_minimizer[1]:
+                self.best_current_minimizer = [sample_point,model_result]
+            
+            # update the surrogate model with the new data point
+            self.update_surrogate(self.surrogate, model_result, sample_point)
 
             num_iterations += 1
-            diff = scipy.linalg.norm(params - params_old)
+            # diff = scipy.linalg.norm(params - params_old)
 
-        return optimal_design_point
+        return self.best_current_minimizer
 
 class BayesOptSurrogate:
 
@@ -176,28 +209,89 @@ class BayesOptModel:
     def evaluate(self):
         raise NotImplementedError
 
+class ExpectedImprovement(BayesOptAcquisition):
 
-class ExpectedImprovementAcquisition(BayesOptAcquisition):
-
-    def __init__(self):
+    def __init__(self,param_bounds):
 
         super().__init__()
 
-        self.cdf = lambda z: djlkfs
-        self.pdf = lambda z: fjslkd
+        self.pdf = lambda z: (1/np.sqrt(2*np.pi))*np.exp(-0.5*(z**2))
+        self.cdf = lambda z: 1 - 0.5*(1+erf(z/np.sqrt(2)))
         self.std_norm = lambda q: mu
+        self.param_bounds = param_bounds
 
-    def get_best_design_point(self):
+    def acquisition_fxn(self,q,surrogate,best_current_minimizer):
+        """
+        Compute the acquisition fxn at design point q
+
+        Parameters
+        ----------
+        q
+            point at which to evaluate surrogate
+        
+        surrogate
+            surrogate model
+
+        best_current_minimizer : list
+            best design point found so far, q*, [design point, value]
+
+        Returns
+        -------
+        aq
+            the value of the acquisition fxn at point q
+        """
+
+        mean, sigma = surrogate.evaluate([q])
+        # print('mean: {}'.format(mean))
+        # print('sigma: {}'.format(sigma))
 
         # compute standard normal of current design point q
-        Z = (mu - obj_fxn_best) / sigma
+        Z = (mean - best_current_minimizer[1]) / sigma
 
         if sigma > 0:
-            aq = (mu - best_minimizer)*self.cdf(Z) + sigma*self.pdf(Z)
+            aq = (mean - best_current_minimizer[1])*self.cdf(Z) + sigma*self.pdf(Z)
         else:
             aq = 0
 
+        print('aq: {}'.format(aq))
         return aq
+
+    def evaluate(self, surrogate, best_current_minimizer):
+
+        next_sample_point = minimize(self.acquisition_fxn,
+                                        best_current_minimizer[0],
+                                        args=(surrogate,best_current_minimizer),
+                                        method='L-BFGS-B',
+                                        bounds=self.param_bounds)
+
+        print('next sample point: {}'.format(next_sample_point.x))
+
+        return next_sample_point.x
+
+class GPSurrogate(BayesOptSurrogate):
+
+    def __init__(self,num_params):
+
+        super().__init__()
+
+        self.gp = sklearn.gaussian_process.GaussianProcessRegressor()
+        self.num_design_params = num_params
+        self.data = np.empty((1,self.num_design_params))
+        self.targets = np.empty((1,1))
+
+    def evaluate(self,design_point):
+        return self.gp.predict(design_point,return_std=True)
+        
+    def update_parameters(self,new_sample_point,sample_point_val):
+        self.data[-1+1,:] = new_sample_point
+        self.targets[-1+1] = sample_point_val
+        self.gp.fit(self.data,self.targets)
+
+    def initialize(self,data,targets):
+        self.data = data
+        self.targets = targets
+        self.gp.fit(self.data,self.targets)
+
 
 def main():
     pass
