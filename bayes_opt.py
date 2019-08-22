@@ -11,6 +11,8 @@ import numpy as np
 import sklearn.gaussian_process
 from scipy.optimize import minimize
 from scipy.special import erf
+from DiRect.DiRect import *
+import matplotlib.pyplot as plt
 
 class BayesOpt(object):
 
@@ -61,6 +63,7 @@ class BayesOpt(object):
         None
         """
         if 'GP' in surrogate_fxn:
+            seed_points = 10
             # extract kernel type
             kernel = surrogate_fxn.split('-')[1]
 
@@ -71,7 +74,7 @@ class BayesOpt(object):
             # seed surrogate w/ some uniformly sampled points
             if seed_data is None:
                 X = (self.param_bounds[:,1]-self.param_bounds[:,0])*np.random.random(
-                                (5,self.param_bounds.shape[0])) + self.param_bounds[:,0]
+                                (seed_points,self.param_bounds.shape[0])) + self.param_bounds[:,0]
                 y = []
                 for i in range(0,X.shape[0]):
                     y.append(self.evaluate_model(X[i,:]))
@@ -100,7 +103,8 @@ class BayesOpt(object):
         updated_model
             Updated surrogate model.
         """
-        return model.update_parameters(sample_point,model_sample)
+        model.update_parameters(sample_point,model_sample)
+        return model
 
     def initialize_acquisition(self, acquisition_fxn):
         """
@@ -161,24 +165,35 @@ class BayesOpt(object):
         sample_point = (self.param_bounds[:,1]-self.param_bounds[:,0])*np.random.random(
                             self.param_bounds.shape[0]) + self.param_bounds[:,0]
 
+        last_val = 0
+        converged = False
+
         # while diff > tol and num_iterations < max_iterations:
         while num_iterations < max_iterations:
+
+            num_iterations += 1
+
+            print('Iteration {}'.format(num_iterations))
 
             # get next sample point from acquisition fxn
             sample_point = self.update_acquisition(sample_point,self.best_current_minimizer)
             # evaluate model at chosen sample point
             print('sample: {}'.format(sample_point))
             model_result = self.evaluate_model(sample_point)
-            print('model result: {}'.format(model_result))
+            # print('model result: {}'.format(model_result))
             
             if model_result < self.best_current_minimizer[1]:
+                last_val = self.best_current_minimizer[1]
+                # print('hit')
                 self.best_current_minimizer = [sample_point,model_result]
             
             # update the surrogate model with the new data point
-            self.update_surrogate(self.surrogate, model_result, sample_point)
+            self.surrogate = self.update_surrogate(self.surrogate, model_result, sample_point)
+            # print(self.surrogate)
 
-            num_iterations += 1
-            # diff = scipy.linalg.norm(params - params_old)
+            print('\t covergence diff: {}'.format(abs(self.best_current_minimizer[1]-last_val)))
+            if abs(self.best_current_minimizer[1]-last_val) < tol:
+                converged = True
 
         return self.best_current_minimizer
 
@@ -187,10 +202,10 @@ class BayesOptSurrogate:
     def __init__(self):
         pass
 
-    def evaluate():
+    def evaluate(self):
         pass
 
-    def update_parameters():
+    def update_parameters(self):
         pass
 
 class BayesOptAcquisition:
@@ -246,27 +261,46 @@ class ExpectedImprovement(BayesOptAcquisition):
         # print('sigma: {}'.format(sigma))
 
         # compute standard normal of current design point q
-        Z = (mean - best_current_minimizer[1]) / sigma
+        Z = (best_current_minimizer[1]-mean) / sigma
 
         if sigma > 0:
-            aq = (mean - best_current_minimizer[1])*self.cdf(Z) + sigma*self.pdf(Z)
+            aq = (best_current_minimizer[1]-mean)*self.cdf(Z) + sigma*self.pdf(Z)
         else:
             aq = 0
 
-        print('aq: {}'.format(aq))
+        # print('aq: {}'.format(aq))
         return aq
 
     def evaluate(self, surrogate, best_current_minimizer):
 
-        next_sample_point = minimize(self.acquisition_fxn,
-                                        best_current_minimizer[0],
-                                        args=(surrogate,best_current_minimizer),
-                                        method='L-BFGS-B',
-                                        bounds=self.param_bounds)
+        # next_sample_point = minimize(self.acquisition_fxn,
+        #                                 best_current_minimizer[0],
+        #                                 args=(surrogate,best_current_minimizer),
+        #                                 method='L-BFGS-B',
+        #                                 bounds=self.param_bounds)
 
-        print('next sample point: {}'.format(next_sample_point.x))
+        self.plot_acquisition(surrogate,best_current_minimizer)
 
-        return next_sample_point.x
+        direct = DiRect(self.acquisition_fxn,bounds=self.param_bounds,
+                                            fxn_args={'surrogate': surrogate, 'best_current_minimizer': best_current_minimizer},
+                                            max_iter=100,
+                                            minimize=False)
+        _,next_sample_point,_ = direct.run()
+
+        # print('next sample point: {}'.format(next_sample_point))
+
+        return next_sample_point
+
+    def plot_acquisition(self,surrogate,best_current_minimizer):
+
+        print(self.param_bounds)
+        xpoints = np.arange(self.param_bounds[0][0],self.param_bounds[0][1],0.05)
+        ypoints = []
+        for point in xpoints:
+            ypoints.append(self.acquisition_fxn([point],surrogate,best_current_minimizer))
+        ypoints = np.reshape(ypoints,(np.size(ypoints,axis=0),))
+        plt.plot(xpoints,ypoints)
+        plt.show()
 
 class GPSurrogate(BayesOptSurrogate):
 
@@ -274,23 +308,60 @@ class GPSurrogate(BayesOptSurrogate):
 
         super().__init__()
 
-        self.gp = sklearn.gaussian_process.GaussianProcessRegressor()
+        self.gp = sklearn.gaussian_process.GaussianProcessRegressor(alpha=1)
         self.num_design_params = num_params
         self.data = np.empty((1,self.num_design_params))
         self.targets = np.empty((1,1))
 
     def evaluate(self,design_point):
-        return self.gp.predict(design_point,return_std=True)
+        return self.gp.predict(design_point,return_cov=True)
         
     def update_parameters(self,new_sample_point,sample_point_val):
-        self.data[-1+1,:] = new_sample_point
-        self.targets[-1+1] = sample_point_val
+        self.data = np.vstack([self.data,new_sample_point])
+        # print(self.data)
+        # print(self.targets)
+        # print(sample_point_val)
+        self.targets = np.hstack([self.targets,sample_point_val])
+        # print(self.targets)
         self.gp.fit(self.data,self.targets)
+
+        # X = np.atleast_2d([1., 3., 5., 6., 7., 8.]).T
+
+        # Observations
+        # y = f(X).ravel()
+
+        # Mesh the input space for evaluations of the real function, the prediction and
+        # its MSE
+        x = np.atleast_2d(np.linspace(-50, 50, 1000)).T
+        y_pred, sigma = self.evaluate(x)
+
+        # self.plot_gp(y_pred,sigma,x,self.data,self.targets)
 
     def initialize(self,data,targets):
         self.data = data
         self.targets = targets
         self.gp.fit(self.data,self.targets)
+            
+    def plot_gp(self, mu, cov, X, X_train=None, Y_train=None, samples=[]):
+        X = X.ravel()
+        mu = mu.ravel()
+        uncertainty = 1.96 * np.sqrt(np.diag(cov))
+        
+        plt.fill_between(X, mu + uncertainty, mu - uncertainty, alpha=0.1)
+        plt.plot(X, mu, label='Mean')
+        for i, sample in enumerate(samples):
+            plt.plot(X, sample, lw=1, ls='--', label='Sample {}'.format(i+1))
+        if X_train is not None:
+            plt.plot(X_train, Y_train, 'rx')
+        plt.legend()
+
+        plt.show()
+    
+    def plot_gp_2D(self, gx, gy, mu, X_train, Y_train, title, i):
+        ax = plt.gcf().add_subplot(1, 2, i, projection='3d')
+        ax.plot_surface(gx, gy, mu.reshape(gx.shape), cmap=cm.coolwarm, linewidth=0, alpha=0.2, antialiased=False)
+        ax.scatter(X_train[:,0], X_train[:,1], Y_train, c=Y_train, cmap=cm.coolwarm)
+        ax.set_title(title)
 
 
 def main():
