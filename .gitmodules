@@ -1,0 +1,3 @@
+[submodule "DiRect"]
+	path = DiRect
+	url = git@github.com:ianloefgren/DiRect.git
